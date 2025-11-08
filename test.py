@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.integrate import solve_ivp
 import warnings
 import time  # 新增：用于统计耗时与预计剩余时间
 
@@ -58,6 +57,18 @@ def true_system_dynamics(t, x_vec, u_t, gamma_2_t):
     dot_z = dot_z_H + dot_z_D
     
     return [dot_x, dot_y, dot_z]
+
+
+def rk4_step(dynamics, t, state, dt, args):
+    """使用经典 RK4 在 [t, t+dt] 上推进一次状态。"""
+    y0 = np.array(state, dtype=float, copy=True)
+
+    k1 = np.asarray(dynamics(t, y0, *args))
+    k2 = np.asarray(dynamics(t + 0.5 * dt, y0 + 0.5 * dt * k1, *args))
+    k3 = np.asarray(dynamics(t + 0.5 * dt, y0 + 0.5 * dt * k2, *args))
+    k4 = np.asarray(dynamics(t + dt, y0 + dt * k3, *args))
+
+    return y0 + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
 def h_model(x_vec):
     """ 测量模型 y = h(x) (光子计数率) """
@@ -295,8 +306,8 @@ def run_simulation():
     u_hji_k = 0.0
 
     # --- 循环 ---
-    # 调整为每一步都打印一次进度
-    report_every = 1
+    # 控制日志输出频率，既保留进度又减少 I/O 开销
+    report_every = max(1, total_steps // 50)
 
     for k, t in enumerate(times):
         # 1. 更新环境 ("敌人")
@@ -317,13 +328,8 @@ def run_simulation():
         
         # --- 3. 运行 GRAPE (蓝线) ---
         u_grape_k = ctrl_grape.get_control(None, X_REF)
-        # 演化（增加心跳日志）
-        print(f"  [step {k+1}/{total_steps}] GRAPE 积分 t=[{t:.1f},{t+DT:.1f}] 开始", flush=True)
-        _tic = time.time()
-        sol = solve_ivp(true_system_dynamics, [t, t+DT], x_true_grape,
-                        args=(u_grape_k, current_gamma))
-        x_true_grape = sol.y[:, -1]
-        print(f"  [step {k+1}/{total_steps}] GRAPE 结束, 用时 {time.time()-_tic:.3f}s", flush=True)
+        x_true_grape = rk4_step(true_system_dynamics, t, x_true_grape, DT,
+                                 (u_grape_k, current_gamma))
         err_grape_hist[k] = np.sum((x_true_grape - X_REF)**2)
         
         # --- 4. 运行 PID (绿线) ---
@@ -333,13 +339,8 @@ def run_simulation():
         x_hat_pid, P_pid = obs_pid.run_step(np.array([[y_pid_k]]), u_pid_k)
         # 控制
         u_pid_k = ctrl_pid.get_control(x_hat_pid, X_REF)
-        # 演化（增加心跳日志）
-        print(f"  [step {k+1}/{total_steps}] PID 积分 t=[{t:.1f},{t+DT:.1f}] 开始", flush=True)
-        _tic = time.time()
-        sol = solve_ivp(true_system_dynamics, [t, t+DT], x_true_pid,
-                        args=(u_pid_k, current_gamma))
-        x_true_pid = sol.y[:, -1]
-        print(f"  [step {k+1}/{total_steps}] PID 结束, 用时 {time.time()-_tic:.3f}s", flush=True)
+        x_true_pid = rk4_step(true_system_dynamics, t, x_true_pid, DT,
+                               (u_pid_k, current_gamma))
         err_pid_hist[k] = np.sum((x_true_pid - X_REF)**2)
 
         # --- 5. 运行 HJI-RL (红线) ---
@@ -351,13 +352,8 @@ def run_simulation():
         # 注意: 注入探索噪声 n(t) 来保证 PE 条件
         n_k = 0.01 * np.random.randn() 
         u_hji_k = ctrl_hji.get_control(x_hat_hji, X_REF) + n_k
-        # 演化（增加心跳日志）
-        print(f"  [step {k+1}/{total_steps}] HJI-RL 积分 t=[{t:.1f},{t+DT:.1f}] 开始", flush=True)
-        _tic = time.time()
-        sol = solve_ivp(true_system_dynamics, [t, t+DT], x_true_hji,
-                        args=(u_hji_k, current_gamma))
-        x_true_hji = sol.y[:, -1]
-        print(f"  [step {k+1}/{total_steps}] HJI-RL 结束, 用时 {time.time()-_tic:.3f}s", flush=True)
+        x_true_hji = rk4_step(true_system_dynamics, t, x_true_hji, DT,
+                               (u_hji_k, current_gamma))
         err_hji_hist[k] = np.sum((x_true_hji - X_REF)**2)
         
         # 记录学习过程
